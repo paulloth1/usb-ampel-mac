@@ -1,7 +1,10 @@
 name: Build & Release
 
+# Releases are driven by the VERSION file: bump it on main and a release
+# v<VERSION> (tag + .app zip) is created automatically if it doesn't exist yet.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -17,10 +20,12 @@ jobs:
       - name: Determine version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            VERSION="${GITHUB_REF_NAME#v}"
           else
-            echo "VERSION=0.0.0-dev" >> "$GITHUB_ENV"
+            VERSION="$(tr -d '[:space:]' < VERSION)"
           fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
 
       - name: Build app
         run: |
@@ -33,10 +38,15 @@ jobs:
           path: build/USB-Ampel-*.zip
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" build/USB-Ampel-*.zip \
-            --title "USB-Ampel $GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists – updating asset"
+            gh release upload "$TAG" build/USB-Ampel-*.zip --clobber
+          else
+            gh release create "$TAG" build/USB-Ampel-*.zip \
+              --target "$GITHUB_SHA" \
+              --title "USB-Ampel $TAG" \
+              --generate-notes
+          fi

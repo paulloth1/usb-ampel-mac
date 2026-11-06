@@ -41,4 +41,4 @@ open build/USB-Ampel.app
 
 ## Release
 
-Push a tag like `v1.0.1` – GitHub Actions builds the app on a macOS runner and attaches the zip to a GitHub release.
+Bump the version in `VERSION` and push to `main` (or push a tag like `v1.0.1`). GitHub Actions builds the app on a macOS runner and attaches the zip to the release `v<VERSION>`.
