@@ -1,4 +1,4 @@
-# USB-Ampel for macOS
+# USB-Ampel for macOS & Linux
 
 A small native macOS app (SwiftUI) to control a **Cleware USB-Ampel** (traffic light, USB ID `0d50:0008`) plugged directly into your Mac.
 
@@ -18,6 +18,25 @@ Requires macOS 13 (Ventura) or later. Universal binary (Apple Silicon + Intel).
    ```bash
    xattr -dr com.apple.quarantine /Applications/USB-Ampel.app
    ```
+
+## Linux (Fedora)
+
+A GTK4/libadwaita version with the same features is packaged as a noarch RPM.
+
+```bash
+sudo dnf install ./usb-ampel-x.y.z-1.*.noarch.rpm
+```
+
+Then start **USB-Ampel** from the app grid, or use the command line:
+
+```bash
+usb-ampel red on
+usb-ampel green off
+usb-ampel off          # all off
+```
+
+The RPM installs a udev rule (`70-cleware-ampel.rules`) that gives the logged-in desktop user
+and members of `wheel` access to the light – no sudo needed. Replug the light once after installing.
 
 ## How it works
 

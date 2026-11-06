@@ -1,0 +1,332 @@
+#!/usr/bin/python3
+"""
+USB-Ampel - control a Cleware USB traffic light (USB ID 0d50:0008) on Linux.
+
+  usb-ampel                      open the GUI
+  usb-ampel red|yellow|green on|off
+  usb-ampel off                  all lights off
+"""
+import glob
+import math
+import sys
+
+VERSION = "@VERSION@"
+APP_ID = "de.paulloth.UsbAmpel"
+ORDER = ["red", "yellow", "green"]
+CODES = {"red": 0x10, "yellow": 0x11, "green": 0x12}
+NAMES = {"red": "Red", "yellow": "Yellow", "green": "Green"}
+RGB = {"red": (1.0, 0.18, 0.15), "yellow": (1.0, 0.78, 0.10), "green": (0.20, 0.90, 0.35)}
+
+
+# ------------------------------------------------------------------ hardware
+def find_device():
+    """Return /dev/hidrawN of the first USB-Ampel, or None."""
+    for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
+        try:
+            with open(uevent) as f:
+                if "00000D50:00000008" in f.read().upper():
+                    return "/dev/" + uevent.split("/")[4]
+        except OSError:
+            continue
+    return None
+
+
+def write_light(dev, color, on):
+    # report ID 0x00, then payload 00 <switch> <state>
+    with open(dev, "wb", buffering=0) as f:
+        f.write(bytes([0x00, 0x00, CODES[color], 0x01 if on else 0x00]))
+
+
+# ------------------------------------------------------------------ CLI
+def cli(args):
+    usage = "usage: usb-ampel [red|yellow|green on|off | off | --version]"
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if args and args[0] in ("-V", "--version"):
+        print(f"usb-ampel {VERSION}")
+        return 0
+
+    valid = args == ["off"] or (len(args) == 2 and args[0] in CODES and args[1] in ("on", "off"))
+    if not valid:
+        print(usage, file=sys.stderr)
+        return 2
+
+    dev = find_device()
+    if dev is None:
+        print("USB-Ampel not found", file=sys.stderr)
+        return 1
+    try:
+        if args == ["off"]:
+            for c in ORDER:
+                write_light(dev, c, False)
+        else:
+            write_light(dev, args[0], args[1] == "on")
+    except PermissionError:
+        print(f"No permission for {dev} - replug the light, or use sudo", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"Write to {dev} failed: {e.strerror}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ------------------------------------------------------------------ GUI
+def gui():
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    import cairo
+    from gi.repository import Adw, Gio, GLib, Gtk
+
+    CSS = """
+    .ampel-housing {
+        background-color: #202022;
+        border-radius: 26px;
+        padding: 16px 20px;
+    }
+    """
+
+    class Controller:
+        BLINK_MS = 600
+
+        def __init__(self, on_change):
+            self.on_change = on_change
+            self.lights = {c: False for c in ORDER}
+            self.blinking = None
+            self.phase = False
+            self.dev = None
+            self.error = None
+            self._blink_id = None
+            self._poll()
+            GLib.timeout_add(1000, self._poll)
+
+        # device presence (survives unplug/replug)
+        def _poll(self):
+            dev = find_device()
+            if dev != self.dev:
+                self.dev = dev
+                self.error = None
+                if dev:
+                    self._apply_all()
+                self.on_change()
+            return True
+
+        def _write(self, color, on):
+            if not self.dev:
+                return
+            try:
+                write_light(self.dev, color, on)
+                self.error = None
+            except PermissionError:
+                self.error = f"No permission for {self.dev}. Replug the light."
+            except OSError as e:
+                self.error = f"Write failed: {e.strerror}"
+
+        def _apply_all(self):
+            for c in ORDER:
+                self._write(c, self.is_lit(c))
+
+        def is_lit(self, color):
+            return self.phase if color == self.blinking else self.lights[color]
+
+        def set(self, color, on):
+            if self.blinking == color:
+                self._stop_blink()
+            self.lights[color] = on
+            self._write(color, on)
+            self.on_change()
+
+        def toggle(self, color):
+            self.set(color, not self.is_lit(color))
+
+        def set_all(self, on):
+            self._stop_blink()
+            for c in ORDER:
+                self.lights[c] = on
+                self._write(c, on)
+            self.on_change()
+
+        def set_blink(self, color):
+            if color == self.blinking:
+                return
+            self._stop_blink()
+            if color is not None:
+                self.blinking = color
+                self.phase = True
+                self.lights[color] = False
+                self._write(color, True)
+                self._blink_id = GLib.timeout_add(self.BLINK_MS, self._tick)
+            self.on_change()
+
+        def _tick(self):
+            if self.blinking is None:
+                return False
+            self.phase = not self.phase
+            self._write(self.blinking, self.phase)
+            self.on_change()
+            return True
+
+        def _stop_blink(self):
+            if self._blink_id:
+                GLib.source_remove(self._blink_id)
+                self._blink_id = None
+            if self.blinking:
+                color, self.blinking, self.phase = self.blinking, None, False
+                self._write(color, self.lights[color])
+
+    class Window(Adw.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title="USB-Ampel")
+            self.set_resizable(False)
+            self.ctrl = None
+            self._syncing = False
+            self.lamps = {}
+
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+            for side in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{side}")(20)
+
+            housing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            housing.add_css_class("ampel-housing")
+            housing.set_halign(Gtk.Align.CENTER)
+            for c in ORDER:
+                da = Gtk.DrawingArea(content_width=84, content_height=84)
+                da.set_draw_func(self._draw_lamp, c)
+                da.set_cursor_from_name("pointer")
+                da.set_tooltip_text(f"Click to toggle {c}")
+                click = Gtk.GestureClick()
+                click.connect("released", lambda *_a, c=c: self.ctrl.toggle(c))
+                da.add_controller(click)
+                housing.append(da)
+                self.lamps[c] = da
+            self.housing = housing
+            box.append(housing)
+
+            buttons = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+            off_btn = Gtk.Button(label="All off")
+            off_btn.connect("clicked", lambda *_: self.ctrl.set_all(False))
+            on_btn = Gtk.Button(label="All on")
+            on_btn.connect("clicked", lambda *_: self.ctrl.set_all(True))
+            buttons.append(off_btn)
+            buttons.append(on_btn)
+            box.append(buttons)
+
+            blink_label = Gtk.Label(label="Blink", xalign=0)
+            blink_label.add_css_class("caption")
+            blink_label.add_css_class("dim-label")
+            box.append(blink_label)
+            blink_box = Gtk.Box(halign=Gtk.Align.FILL, homogeneous=True)
+            blink_box.add_css_class("linked")
+            self.blink_buttons = {}
+            group = None
+            for key, label in [(None, "None")] + [(c, NAMES[c]) for c in ORDER]:
+                btn = Gtk.ToggleButton(label=label)
+                if group:
+                    btn.set_group(group)
+                else:
+                    group = btn
+                btn.connect("toggled", self._on_blink_toggled, key)
+                blink_box.append(btn)
+                self.blink_buttons[key] = btn
+            box.append(blink_box)
+
+            self.status = Gtk.Label()
+            self.status.add_css_class("caption")
+            self.status.add_css_class("dim-label")
+            box.append(self.status)
+            self.error = Gtk.Label(wrap=True, max_width_chars=30, visible=False)
+            self.error.add_css_class("caption")
+            self.error.add_css_class("error")
+            box.append(self.error)
+
+            view = Adw.ToolbarView()
+            view.add_top_bar(Adw.HeaderBar())
+            view.set_content(box)
+            self.set_content(view)
+
+            for name, fn in [
+                ("toggle-red", lambda: self.ctrl.toggle("red")),
+                ("toggle-yellow", lambda: self.ctrl.toggle("yellow")),
+                ("toggle-green", lambda: self.ctrl.toggle("green")),
+                ("all-off", lambda: self.ctrl.set_all(False)),
+            ]:
+                action = Gio.SimpleAction.new(name, None)
+                action.connect("activate", lambda *_a, fn=fn: fn())
+                self.add_action(action)
+
+            self.ctrl = Controller(self.refresh)
+            self.refresh()
+
+        def _on_blink_toggled(self, btn, key):
+            if self._syncing or not btn.get_active() or self.ctrl is None:
+                return
+            self.ctrl.set_blink(key)
+
+        def refresh(self):
+            if self.ctrl is None:
+                return
+            for da in self.lamps.values():
+                da.queue_draw()
+            self._syncing = True
+            self.blink_buttons[self.ctrl.blinking].set_active(True)
+            self._syncing = False
+            if self.ctrl.dev:
+                self.status.set_label(f"● Connected ({self.ctrl.dev})")
+                self.housing.set_opacity(1.0)
+            else:
+                self.status.set_label("○ Not connected – plug in the USB-Ampel")
+                self.housing.set_opacity(0.55)
+            self.error.set_label(self.ctrl.error or "")
+            self.error.set_visible(bool(self.ctrl.error))
+
+        def _draw_lamp(self, _area, cr, w, h, color):
+            r, g, b = RGB[color]
+            lit = self.ctrl.is_lit(color) if self.ctrl else False
+            cx, cy = w / 2, h / 2
+            rad = min(w, h) / 2 - 10
+            if lit:
+                glow = cairo.RadialGradient(cx, cy, rad * 0.6, cx, cy, rad + 10)
+                glow.add_color_stop_rgba(0, r, g, b, 0.75)
+                glow.add_color_stop_rgba(1, r, g, b, 0.0)
+                cr.set_source(glow)
+                cr.arc(cx, cy, rad + 10, 0, 2 * math.pi)
+                cr.fill()
+            cr.arc(cx, cy, rad, 0, 2 * math.pi)
+            if lit:
+                cr.set_source_rgb(r, g, b)
+            else:
+                cr.set_source_rgb(r * 0.25, g * 0.25, b * 0.25)
+            cr.fill_preserve()
+            cr.set_source_rgba(0, 0, 0, 0.6)
+            cr.set_line_width(2)
+            cr.stroke()
+
+    class App(Adw.Application):
+        def __init__(self):
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+        def do_startup(self):
+            Adw.Application.do_startup(self)
+            provider = Gtk.CssProvider()
+            if hasattr(provider, "load_from_string"):
+                provider.load_from_string(CSS)
+            else:
+                provider.load_from_data(CSS, -1)
+            from gi.repository import Gdk
+            Gtk.StyleContext.add_provider_for_display(
+                Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self.set_accels_for_action("win.toggle-red", ["<Control>1"])
+            self.set_accels_for_action("win.toggle-yellow", ["<Control>2"])
+            self.set_accels_for_action("win.toggle-green", ["<Control>3"])
+            self.set_accels_for_action("win.all-off", ["<Control>0"])
+
+        def do_activate(self):
+            win = self.props.active_window or Window(self)
+            win.present()
+
+    return App().run(None)
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]) if len(sys.argv) > 1 else gui())

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=USB-Ampel
+Comment=Control a Cleware USB traffic light
+Exec=usb-ampel
+Icon=de.paulloth.UsbAmpel
+Terminal=false
+Categories=Utility;
+Keywords=traffic;light;cleware;ampel;usb;
+StartupNotify=true

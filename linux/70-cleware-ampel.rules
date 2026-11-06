@@ -1,0 +1,4 @@
+# Cleware USB-Ampel (traffic light)
+# uaccess: the user logged in at the desktop gets access automatically.
+# wheel:   admins can also use the CLI over SSH without sudo.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0d50", ATTRS{idProduct}=="0008", TAG+="uaccess", GROUP="wheel", MODE="0660"
